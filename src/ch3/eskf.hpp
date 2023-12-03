@@ -14,7 +14,8 @@
 
 #include <glog/logging.h>
 #include <iomanip>
-
+DECLARE_bool(WITH_F_update_error_state); 
+DECLARE_bool(LEFT_DISTURB); 
 namespace sad {
 
 /**
@@ -160,7 +161,12 @@ class ESKF {
     void UpdateAndReset() {
         p_ += dx_.template block<3, 1>(0, 0);
         v_ += dx_.template block<3, 1>(3, 0);
-        R_ = R_ * SO3::exp(dx_.template block<3, 1>(6, 0));
+        if (FLAGS_LEFT_DISTURB) {
+            R_ = SO3::exp(dx_.template block<3, 1>(6, 0)) * R_;
+        }
+        else {
+            R_ = R_ * SO3::exp(dx_.template block<3, 1>(6, 0));
+        }
 
         if (options_.update_bias_gyro_) {
             bg_ += dx_.template block<3, 1>(9, 0);
@@ -175,11 +181,16 @@ class ESKF {
         ProjectCov();
         dx_.setZero();
     }
-
+    void dx_update(double const& dt, IMU const & imu);
     /// 对P阵进行投影，参考式(3.63)
     void ProjectCov() {
         Mat18T J = Mat18T::Identity();
-        J.template block<3, 3>(6, 6) = Mat3T::Identity() - 0.5 * SO3::hat(dx_.template block<3, 1>(6, 0));
+        if (FLAGS_LEFT_DISTURB) {
+            J.template block<3, 3>(6, 6) = Mat3T::Identity() + 0.5 * SO3::hat(dx_.template block<3, 1>(6, 0));
+        }
+        else {
+            J.template block<3, 3>(6, 6) = Mat3T::Identity() - 0.5 * SO3::hat(dx_.template block<3, 1>(6, 0));
+        }
         cov_ = J * cov_ * J.transpose();
     }
 
@@ -242,17 +253,48 @@ bool ESKF<S>::Predict(const IMU& imu) {
     // F实际上是稀疏矩阵，也可以不用矩阵形式进行相乘而是写成散装形式，这里为了教学方便，使用矩阵形式
     Mat18T F = Mat18T::Identity();                                                 // 主对角线
     F.template block<3, 3>(0, 3) = Mat3T::Identity() * dt;                         // p 对 v
+    if (FLAGS_LEFT_DISTURB) {
+    F.template block<3, 3>(3, 6) = -R_.matrix() * SO3::hat(imu.acce_ - ba_) * dt;  // v对theta
+    F.template block<3, 3>(3, 12) = -R_.matrix() * dt;                             // v 对 ba
+    F.template block<3, 3>(3, 15) = Mat3T::Identity() * dt;                        // v 对 g
+    F.template block<3, 3>(6, 9) = -R_.matrix() * dt;                              // theta 对 bg        
+    }
+    else {
     F.template block<3, 3>(3, 6) = -R_.matrix() * SO3::hat(imu.acce_ - ba_) * dt;  // v对theta
     F.template block<3, 3>(3, 12) = -R_.matrix() * dt;                             // v 对 ba
     F.template block<3, 3>(3, 15) = Mat3T::Identity() * dt;                        // v 对 g
     F.template block<3, 3>(6, 6) = SO3::exp(-(imu.gyro_ - bg_) * dt).matrix();     // theta 对 theta
     F.template block<3, 3>(6, 9) = -Mat3T::Identity() * dt;                        // theta 对 bg
+    }
 
     // mean and cov prediction
-    dx_ = F * dx_;  // 这行其实没必要算，dx_在重置之后应该为零，因此这步可以跳过，但F需要参与Cov部分计算，所以保留
+    if (FLAGS_WITH_F_update_error_state || FLAGS_LEFT_DISTURB) {
+        dx_ = F * dx_;  // 这行其实没必要算，dx_在重置之后应该为零，因此这步可以跳过，但F需要参与Cov部分计算，所以保留
+    }
+    else {
+        dx_update(dt, imu);
+    }
     cov_ = F * cov_.eval() * F.transpose() + Q_;
     current_time_ = imu.timestamp_;
     return true;
+}
+
+template <typename S>
+void ESKF<S>::dx_update(double const& dt, IMU const & imu) {
+    Vec3d ev;
+    ev << Q_(3,3), Q_(4,4), Q_(5,5);
+    Vec3d et;
+    et << Q_(6,6), Q_(7,7), Q_(8,8);
+    Vec3d eg;
+    eg << Q_(9,9), Q_(10,10), Q_(11,11);
+    Vec3d ea;
+    ea << Q_(12,12), Q_(13,13), Q_(14,14);
+
+    dx_.template block<3, 1>(0, 0) += dx_.template block<3, 1>(3, 0)  * dt; 
+    dx_.template block<3, 1>(3, 0) += (-R_.matrix() * SO3::hat(imu.acce_ - ba_)) * dx_.template block<3, 1>(6, 0) - R_.matrix() * (dx_.template block<3, 1>(12, 0) + dx_.template block<3, 1>(15, 0)) *dt - ev;
+    dx_.template block<3, 1>(6, 0) = SO3::exp(-(imu.gyro_ - bg_) * dt).matrix()*dx_.template block<3, 1>(6, 0)-dx_.template block<3, 1>(9, 0) * dt - et;
+    dx_.template block<3, 1>(9, 0) += eg;
+    dx_.template block<3, 1>(12, 0) += ea;
 }
 
 template <typename S>
@@ -290,6 +332,7 @@ bool ESKF<S>::ObserveGps(const GNSS& gnss) {
     assert(gnss.unix_time_ >= current_time_);
 
     if (first_gnss_) {
+        //init
         R_ = gnss.utm_pose_.so3();
         p_ = gnss.utm_pose_.translation();
         first_gnss_ = false;
@@ -304,6 +347,7 @@ bool ESKF<S>::ObserveGps(const GNSS& gnss) {
     return true;
 }
 
+//core 2
 template <typename S>
 bool ESKF<S>::ObserveSE3(const SE3& pose, double trans_noise, double ang_noise) {
     /// 既有旋转，也有平移
@@ -322,7 +366,12 @@ bool ESKF<S>::ObserveSE3(const SE3& pose, double trans_noise, double ang_noise) 
     // 更新x和cov
     Vec6d innov = Vec6d::Zero();
     innov.template head<3>() = (pose.translation() - p_);          // 平移部分
-    innov.template tail<3>() = (R_.inverse() * pose.so3()).log();  // 旋转部分(3.67)
+    if (FLAGS_LEFT_DISTURB) {
+        innov.template tail<3>() = (pose.so3() * R_.inverse()).log();  // 旋转部分(3.67)
+    }
+    else {
+        innov.template tail<3>() = (R_.inverse() * pose.so3()).log();  // 旋转部分(3.67)
+    }
 
     dx_ = K * innov;
     cov_ = (Mat18T::Identity() - K * H) * cov_;

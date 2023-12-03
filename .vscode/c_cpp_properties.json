@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${default}",
+                "${workspaceFolder}/src",
+                "/usr/include/eigen3",
+                "${workspaceFolder}/thirdparty/sophus",
+                "/usr/include/opencv4",
+                "/usr/include/pcl-1.10",
+                "/opt/ros/noetic/include/",
+                "${workspaceFolder}/build/devel/include",
+                "${workspaceFolder}/thirdparty"
+            ],
+            "defines": [],
+            "compilerPath": "/usr/bin/gcc",
+            "cStandard": "c17",
+            "cppStandard": "gnu++14",
+            "intelliSenseMode": "linux-gcc-x64"
+        }
+    ],
+    "version": 4
+}

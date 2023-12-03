@@ -18,6 +18,8 @@ DEFINE_double(antenna_angle, 12.06, "RTK天线安装偏角（角度）");
 DEFINE_double(antenna_pox_x, -0.17, "RTK天线安装偏移X");
 DEFINE_double(antenna_pox_y, -0.20, "RTK天线安装偏移Y");
 DEFINE_bool(with_ui, true, "是否显示图形界面");
+DEFINE_bool(WITH_F_update_error_state, true, "update delta x use error_state");
+
 
 /**
  * 本程序演示如何处理GNSS数据
